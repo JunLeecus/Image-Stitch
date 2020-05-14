@@ -4,17 +4,24 @@ Created on 2020-05-07 11:57:29
 @Author: xxx
 @Version : 1.1
 """
+import warnings
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    import pymssql        #需忽略警告的模块
 
 from enum import Enum
 from typing import List, Tuple, Union
-from L2_Net import cal_L2Net_des
 from slice import slice
+import tensorflow as tf
+import vgg16
 import unittest
 import os
 import random
+from numpy import *
 
 import cv2
 import numpy as np
+
 
 import k_means
 import ransac
@@ -116,25 +123,69 @@ class Matcher():
 
     def compute_kepoint_by_L2_Net(self) -> None:
         """
-        通过L2-Net计算描述向量，32*32尺寸图像描述向量为128；64*64尺寸图像描述向量为256
+        通过VGG计算描述向量+PCA
         筛选并存储描述向量和keypoint。
 
         """
         self.get_the_ros()
-        print('Compute keypoint by L2_Net')
+        print('Compute keypoint by VGG')
+        batch1 = self.ros1.shape[0]
+        batch2 = self.ros2.shape[0]
+        batch = 64
+
+        batch_num = 0
+        print("First image")
+        while batch_num < batch1:
+            if batch_num + batch > batch1:
+                batch_end = batch1
+            else:
+                batch_end = batch_num + batch
+            with tf.Session() as sess:
+                images1 = tf.placeholder("float", [batch_end - batch_num, 64, 64, 3])
+                feed_dict1 = {images1: self.ros1[batch_num:batch_end, :, :, :]}
+                print('Processing %d image ...' % batch_num)
+                vgg1 = vgg16.Vgg16()
+                with tf.name_scope("content_vgg"):
+                    vgg1.build(images1)
+                ros1_descriptors1 = np.array(self.ratio * sess.run(vgg1.prob, feed_dict=feed_dict1), dtype=np.float32)
+                ros1_descriptors1 = np.squeeze(ros1_descriptors1)
+                # print("PCA ...")
+                ros1_descriptors1, _, _ = pca(ros1_descriptors1, 128)
+                ros1_descriptors1 = np.array(ros1_descriptors1, dtype=np.float32)
+
+                print("Image %d compute finish ... Processing ..." % batch_end)
+                self._descriptors1 = np.concatenate((self._descriptors1, ros1_descriptors1), axis=0)
+                self._keypoints1.extend(self.loc1[batch_num:batch_end])
+                # print("Processing finish ...")
+            batch_num = batch_end
+
+        batch_num = 0
+        print("Second image")
+        while batch_num < batch2:
+            if batch_num + batch > batch2:
+                batch_end = batch2
+            else:
+                batch_end = batch_num + batch
+            with tf.Session() as sess:
+                images2 = tf.placeholder("float", [batch_end - batch_num, 64, 64, 3])
+                feed_dict2 = {images2: self.ros2[batch_num:batch_end, :, :, :]}
+                print('Processing %d image ...' % batch_num)
+                vgg2 = vgg16.Vgg16()
+                with tf.name_scope("content_vgg"):
+                    vgg2.build(images2)
+                ros2_descriptors2 = np.array(self.ratio * sess.run(vgg2.prob, feed_dict=feed_dict2), dtype=np.float32)
+                ros2_descriptors2 = np.squeeze(ros2_descriptors2)
+                # print("PCA ...")
+                ros2_descriptors2, _, _ = pca(ros2_descriptors2, 128)
+                ros2_descriptors2 = np.array(ros2_descriptors2, dtype=np.float32)
+                print("Image %d compute finish ... Processing ..." % batch_end)
+                self._descriptors2 = np.concatenate((self._descriptors2, ros2_descriptors2), axis=0)
+                self._keypoints2.extend(self.loc2[batch_num:batch_end])
+                # print("Processing finish ...")
+            batch_num = batch_end
 
         # 描述符比较小，均0.0x 需将其扩大
-        ros1_descriptors1 = np.array(self.ratio * cal_L2Net_des("L2Net-HP+", self.ros1, flagCS=False), dtype=np.float32)
-        print("Image 1 compute finish ... Processing ...")
-        self._descriptors1 = np.concatenate((self._descriptors1, ros1_descriptors1), axis=0)
-        self._keypoints1.extend(self.loc1)
-        print("Processing finish ...")
 
-        ros2_descriptors2 = np.array(self.ratio * cal_L2Net_des("L2Net-HP+", self.ros2, flagCS=False), dtype=np.float32)
-        print("Image 2 compute finish ... Processing ...")
-        self._descriptors2 = np.concatenate((self._descriptors2, ros2_descriptors2), axis=0)
-        self._keypoints2.extend(self.loc2)
-        print("Processing finish ...")
 
     def match(self, max_match_lenth=20, threshold=0.04, show_match=False):
         """对两幅图片计算得出的特征值进行匹配，对ORB来说使用OpenCV的BFMatcher算法，而对于其他特征检测方法则使用FlannBasedMatcher算法。
@@ -191,6 +242,18 @@ def get_weighted_points(image_points: np.ndarray):
     max_index = np.argmax(np.linalg.norm((image_points - average), axis=1))
     return np.append(image_points, np.array([image_points[max_index]]), axis=0)
 
+
+def pca(image, rate=128):
+    mean_value = mean(image, axis=0)
+    image = image-mean_value
+    c = cov(image, rowvar=0)
+    eigvalue, eigvector = linalg.eig(mat(c))
+
+    index_vec = np.argsort(-eigvalue)
+    n_largest_index = index_vec[:rate]
+    t = eigvector[:, n_largest_index]
+    new_image = np.dot(image, t)
+    return new_image, t, mean_value
 
 class Stitcher:
 
@@ -277,7 +340,7 @@ class Stitcher:
                 point2 = self.get_transformed_position(tuple(point2), M=self.adjustM)
                 point2 = tuple(map(int, point2))
 
-                cv2.line(self.image, point1, point2, random.choice(colors), 3)
+                # cv2.line(self.image, point1, point2, random.choice(colors), 3)
                 cv2.circle(self.image, point1, 10, (20, 20, 255), 5)
                 cv2.circle(self.image, point2, 8, (20, 200, 20), 5)
         if show_result:
@@ -381,71 +444,6 @@ class Stitcher:
         return pa[0, 0] / pa[2, 0], pa[1, 0] / pa[2, 0]
 
 
-class Test(unittest.TestCase):
-
-    def _test_matcher(self):
-        image1 = np.random.randint(100, 256, size=(400, 400, 3), dtype='uint8')
-        # np.random.randint(256, size=(400, 400, 3), dtype='uint8')
-        image2 = np.copy(image1)
-        for method in Method:
-            matcher = Matcher(image1, image2, method)
-
-            matcher.match(show_match=True)
-
-    def test_transform_coord(self):
-        stitcher = Stitcher(None, None, None, None)
-        self.assertEqual((0, 0), stitcher.get_transformed_position(0, 0))
-        self.assertEqual((10, 20), stitcher.get_transformed_position(10, 20))
-
-        stitcher.M[0, 2] = 20
-        stitcher.M[1, 2] = 10
-        self.assertEqual((20, 10), stitcher.get_transformed_position(0, 0))
-        self.assertEqual((30, 30), stitcher.get_transformed_position(10, 20))
-
-        stitcher.M = np.eye(3)
-        stitcher.M[0, 1] = 2
-        stitcher.M[1, 0] = 4
-        self.assertEqual((0, 0), stitcher.get_transformed_position(0, 0))
-        self.assertEqual((50, 60), stitcher.get_transformed_position(10, 20))
-
-    def test_get_transformed_size(self):
-        image1 = np.empty((500, 400, 3), dtype='uint8')
-        image1[:, :] = 255, 150, 100
-        image1[:, 399] = 10, 20, 200
-
-        # show_image(image1)
-        image2 = np.empty((400, 400, 3), dtype='uint8')
-        image2[:, :] = 50, 150, 255
-
-        stitcher = Stitcher(image1, image2, None, None)
-        stitcher.M[0, 2] = -20
-        stitcher.M[1, 2] = 10
-        stitcher.M[0, 1] = .2
-        stitcher.M[1, 0] = .1
-        left, right, top, bottom = stitcher.get_transformed_size()
-        print(stitcher.get_transformed_size())
-        width = int(max(right, image2.shape[1]) - min(left, 0))
-        height = int(max(bottom, image2.shape[0]) - min(top, 0))
-        print(width, height)
-        show_image(cv2.warpPerspective(image1, stitcher.M, (width, height)))
-
-    def test_stich(self):
-        image1 = np.empty((500, 400, 3), dtype='uint8')
-        image1[:, :] = 255, 150, 100
-        image1[:, 399] = 10, 20, 200
-
-        # show_image(image1)
-        image2 = np.empty((400, 400, 3), dtype='uint8')
-        image2[:, :] = 50, 150, 255
-
-        points = np.float32([[0, 0], [20, 20], [12, 12], [40, 20]])
-        stitcher = Stitcher(image1, image2, points, points)
-        stitcher.M[0, 2] = 20
-        stitcher.M[1, 2] = 10
-        stitcher.M[0, 1] = .2
-        stitcher.M[1, 0] = .1
-        stitcher.stich()
-
 def equalhist(image):
     """
     图像预处理，进行直方图均衡化。
@@ -474,17 +472,16 @@ if __name__ == "__main__":
     os.chdir(os.path.dirname(__file__))
 
     start_time = time.time()
-    img1 = cv2.imread("../example/1-left.jpeg")
-    img2 = cv2.imread("../example/1-right.jpeg")
+    img1 = cv2.imread("../example/11.png")
+    img2 = cv2.imread("../example/12.png")
 
     img1 = equalhist(img1)
     img2 = equalhist(img2)
 
-
     stitcher = Stitcher(img1, img2, Method.SIFT, False)
     stitcher.stich(max_match_lenth=50, use_partial=False, use_new_match_method=1, use_gauss_blend=0)
 
-    # cv2.imwrite('../resource/19-sift-gf.jpg', stitcher.image)
+    # cv2.imwrite('../example/merge.jpg', stitcher.image)
 
     print("Time: ", time.time() - start_time)
     print("M: ", stitcher.M)
